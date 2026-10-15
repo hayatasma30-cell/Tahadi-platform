@@ -2930,7 +2930,7 @@ function handleStudentSave(){
   defaultSave();
 }
 
-function defaultSave(){
+async function defaultSave(){
   const firstName = (firstNameInput?.value || "").trim();
   const lastName = (lastNameInput?.value || "").trim();
   const name = [firstName,lastName].filter(Boolean).join(" ");
@@ -2950,35 +2950,47 @@ function defaultSave(){
     alert("رقم هاتف الولي غير صحيح. أدخليه بالصيغة 0XXXXXXXXX.");
     return;
   }
-  students.push({
-    name, firstName, lastName, parentName, parentPhone, schoolName, notes,
-    parentCode: generateMixedParentCode(), level, type, group,
-    code: nextCode(),
-    createdAt: new Date().toISOString()
-  });
-
-  saveData();
-  render();
-  // تحديث فوري لكل الواجهات المرتبطة بالتلميذ الجديد
-  if(typeof renderAttendanceHistory === "function") renderAttendanceHistory();
-  if(typeof renderAttendanceAlerts === "function") renderAttendanceAlerts();
-  document.dispatchEvent(new CustomEvent('studentsChanged'));
-
-  // إذا تمت إضافة التلميذ من داخل فوج، نحفظه ثم نغلق النافذة ونرجع تلقائيًا إلى الفوج.
-  const returnToGroupId = studentAddChoiceGroupId;
-  modal.classList.remove("show");
-  typeInput.disabled = false;
-  levelInput.disabled = false;
-  studentGroupInput.disabled = false;
-  addingStudentType = "";
-  document.getElementById("studentModalTitle").textContent = "➕ إضافة تلميذ";
-
-  if(returnToGroupId){
-    studentAddChoiceGroupId = null;
-    currentGroupId = returnToGroupId;
-    renderGroupDetails();
-    if(typeof window.L12showPage === "function") window.L12showPage('groupDetailsPage');
-  }
+  const saveButton=document.getElementById("saveBtn");
+  const oldButtonText=saveButton?.textContent||"حفظ";
+  if(saveButton){saveButton.disabled=true;saveButton.textContent="جارٍ الحفظ في قاعدة البيانات…";}
+  try{
+    // التسجيل المركزي لا يتم إلا بعد التحقق من جلسة المشرفة؛ لا نعلن النجاح اعتمادًا على localStorage فقط.
+    const sb=typeof window.getE1SupabaseClient==='function'?await window.getE1SupabaseClient():window.E1SupabaseClient;
+    if(!sb)throw new Error('اتصال Supabase غير جاهز. افتحي اتصال قاعدة البيانات ثم أعيدي المحاولة.');
+    const {data:{session},error:sessionError}=await sb.auth.getSession();
+    if(sessionError)throw sessionError;
+    if(!session?.access_token)throw new Error('سجّلي الدخول إلى فضاء الأستاذة حياة أولًا. لم يُحفظ التلميذ محليًا أو سحابيًا.');
+    const response=await fetch('https://obmwfinygcmifdtlhsiy.supabase.co/functions/v1/teacher-register-student',{
+      method:'POST',headers:{'Content-Type':'application/json','apikey':'sb_publishable_wcoH3s9B0MZnhUpLlMdK_g_9tfzvwBC','Authorization':'Bearer '+session.access_token},
+      body:JSON.stringify({fullName:name,parentFullName:parentName,parentPhone,level,learningMode:type,groupName:group,notes})
+    });
+    const result=await response.json().catch(()=>({}));
+    if(!response.ok||!result.ok){
+      if(response.status===409&&result.existing?.student_code)throw new Error((result.message||'التلميذ مسجل مسبقًا.')+' كود التلميذ الموجود: '+result.existing.student_code+'. لم تتم إضافة سجل مكرر.');
+      throw new Error(result.message||'لم يؤكد Supabase حفظ التلميذ. لم تتم إضافته إلى القائمة المحلية.');
+    }
+    const cloud=result.student||{};
+    const student={id:cloud.id||null,code:cloud.student_code||nextCode(),student_code:cloud.student_code||'',studentCode:cloud.student_code||'',
+      name:cloud.full_name||name,studentName:cloud.full_name||name,full_name:cloud.full_name||name,firstName,lastName,parentName:cloud.parent_full_name||parentName,parent_full_name:cloud.parent_full_name||parentName,
+      parentPhone:cloud.parent_telegram||parentPhone,parent_telegram:cloud.parent_telegram||parentPhone,schoolName,notes:cloud.notes??notes,
+      parentCode:generateMixedParentCode(),level:cloud.level||level,type:cloud.learning_mode||type,mode:cloud.learning_mode||type,learning_mode:cloud.learning_mode||type,
+      group:cloud.group_name||group,group_name:cloud.group_name||group,groupId:cloud.group_id||'',group_id:cloud.group_id||'',createdAt:cloud.created_at||new Date().toISOString(),cloudSaved:true};
+    students.push(student);
+    try{saveData();}catch(storageError){console.warn('Student saved in Supabase but local cache could not be updated:',storageError);}
+    render();
+    if(typeof renderAttendanceHistory === "function") renderAttendanceHistory();
+    if(typeof renderAttendanceAlerts === "function") renderAttendanceAlerts();
+    document.dispatchEvent(new CustomEvent('studentsChanged'));
+    const returnToGroupId = studentAddChoiceGroupId;
+    modal.classList.remove("show");
+    typeInput.disabled = false;levelInput.disabled = false;studentGroupInput.disabled = false;addingStudentType = "";
+    document.getElementById("studentModalTitle").textContent = "➕ إضافة تلميذ";
+    if(returnToGroupId){studentAddChoiceGroupId=null;currentGroupId=returnToGroupId;renderGroupDetails();if(typeof window.L12showPage === "function")window.L12showPage('groupDetailsPage');}
+    alert('تم حفظ التلميذ في Supabase بنجاح. كود التلميذ: '+student.code);
+  }catch(err){
+    console.error('Haya 34 cloud student registration failed',err);
+    alert('لم يتم حفظ التلميذ: '+(err?.message||String(err))+'\nلم نضف سجلًا محليًا حتى لا يظهر كأنه محفوظ سحابيًا.');
+  }finally{if(saveButton){saveButton.disabled=false;saveButton.textContent=oldButtonText;}}
 }
 
 function removeStudent(index){
@@ -8115,20 +8127,30 @@ window.FHA02CloudStatus = {
    if(!Array.isArray(rows))throw new Error('لم تُرجع قاعدة البيانات قائمة صالحة.');
    const localRaw=localStorage.getItem('attendance_L1_students')||'[]';let local=JSON.parse(localRaw);if(!Array.isArray(local))throw new Error('قائمة التلاميذ المحلية ليست بصيغة صحيحة؛ أوقفت العملية لحمايتها.');
    const map=new Map();for(const st of local){const k=norm(st.code||st.student_code||st.studentCode);if(k&&!map.has(k))map.set(k,{...st});}let added=0,updated=0;
-   for(const r of rows){const code=norm(r.student_code);if(!code)continue;const old=map.get(code);const mapped={...(old||{}),id:r.id||old?.id,code:r.student_code,student_code:r.student_code,studentCode:r.student_code,name:r.full_name||old?.name||old?.studentName||'',studentName:r.full_name||old?.studentName||old?.name||'',full_name:r.full_name||old?.full_name||'',level:r.level||old?.level||'',type:(/^(حضوري|حضور|in.?person)$/i.test(String(r.learning_mode||''))?'حضوري':(/^(عن بعد|zoom|online|remote)$/i.test(String(r.learning_mode||''))?'عن بعد':(r.learning_mode||old?.type||old?.learning_mode||''))),mode:(/^(حضوري|حضور|in.?person)$/i.test(String(r.learning_mode||''))?'حضوري':(/^(عن بعد|zoom|online|remote)$/i.test(String(r.learning_mode||''))?'عن بعد':(r.learning_mode||old?.mode||''))),learning_mode:r.learning_mode||old?.learning_mode||'',notes:r.notes??old?.notes??'',parentPhone:r.parent_telegram||old?.parentPhone||'',parent_telegram:r.parent_telegram||old?.parent_telegram||'',groupId:r.group_id||old?.groupId||old?.group_id||'',group_id:r.group_id||old?.group_id||old?.groupId||'',group:r.group_name||old?.group||old?.group_name||'',group_name:r.group_name||old?.group_name||old?.group||''};
-    // Preserve local-only fields; fill missing contact/group fields from Supabase without erasing local values.
+   const normalizeMode=(value,fallback='')=>{const v=String(value||'').trim().toLowerCase();if(/^(حضوري|حضور|in.?person|onsite|inperson)$/.test(v))return 'حضوري';if(/^(عن بعد|عن\s*بعد|zoom|online|remote|distance)$/.test(v))return 'عن بعد';return fallback||'';};
+   for(const r of rows){const code=norm(r.student_code);if(!code)continue;const old=map.get(code);const fullName=String(r.full_name||old?.name||old?.studentName||old?.full_name||'').trim();const parts=fullName.split(/\s+/).filter(Boolean);const cloudMode=normalizeMode(r.learning_mode,normalizeMode(old?.type||old?.mode||old?.learning_mode,''));
+    const mapped={...(old||{}),id:r.id||old?.id,code:r.student_code,student_code:r.student_code,studentCode:r.student_code,
+      name:fullName,studentName:fullName,full_name:fullName,
+      firstName:old?.firstName||parts.shift()||'',lastName:old?.lastName||(parts.join(' ')),
+      parentName:String(r.parent_full_name||old?.parentName||old?.parent_full_name||'').trim(),parent_full_name:r.parent_full_name||old?.parent_full_name||old?.parentName||'',
+      level:String(r.level||old?.level||'').trim(),type:cloudMode,mode:cloudMode,learning_mode:r.learning_mode||old?.learning_mode||cloudMode,
+      notes:r.notes??old?.notes??'',parentPhone:r.parent_telegram||old?.parentPhone||'',parent_telegram:r.parent_telegram||old?.parent_telegram||'',
+      groupId:r.group_id||old?.groupId||old?.group_id||'',group_id:r.group_id||old?.group_id||old?.groupId||'',
+      group:r.group_name||old?.group||old?.group_name||'',group_name:r.group_name||old?.group_name||old?.group||''};
+    // Keep locally maintained profile fields when the cloud record has no value for them.
+    if(!mapped.type)mapped.type=normalizeMode(old?.type||old?.mode||old?.learning_mode,'عن بعد');
     if(!old)added++;else updated++;
     map.set(code,mapped);
    }
    const merged=Array.from(map.values());
    // Haya 15: لا تحفظ نسخة ضخمة ثانية داخل localStorage (تسبب exceeded quota).
    // أنشئ ملف JSON قابلًا للتنزيل قبل تغيير القائمة المحلية، دون حذف بيانات المصدر.
-   const backupPayload={version:'Haya 33',createdAt:new Date().toISOString(),key:'attendance_L1_students',data:localRaw};
+   const backupPayload={version:'Haya 34',createdAt:new Date().toISOString(),key:'attendance_L1_students',data:localRaw};
    const backupBlob=new Blob([JSON.stringify(backupPayload)],{type:'application/json;charset=utf-8'});
    const backupUrl=URL.createObjectURL(backupBlob);
    const backupLink=document.createElement('a');
    backupLink.href=backupUrl;
-   backupLink.download='Haya 33_students_before_cloud_merge_'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
+   backupLink.download='Haya 34_students_before_cloud_merge_'+new Date().toISOString().replace(/[:.]/g,'-')+'.json';
    backupLink.style.display='none';document.body.appendChild(backupLink);backupLink.click();backupLink.remove();
    setTimeout(()=>URL.revokeObjectURL(backupUrl),3000);
    // Haya 33: عرض بيانات السحابة أولًا؛ امتلاء localStorage لا يجوز أن يترك القائمة بصفر.
@@ -8142,7 +8164,7 @@ window.FHA02CloudStatus = {
    if(typeof render==='function') render();
    let localSaved=true;
    try{localStorage.setItem('attendance_L1_students',JSON.stringify(merged));}
-   catch(storageErr){localSaved=false;console.warn('Haya 33: localStorage full; cloud student list remains available in memory.',storageErr);}
+   catch(storageErr){localSaved=false;console.warn('Haya 34: localStorage full; cloud student list remains available in memory.',storageErr);}
    const summary='تم تحميل '+rows.length+' تلميذًا من Supabase وعرض القائمة. أُضيف '+added+' وطُوبق '+updated+' سجلًا. تم تنزيل نسخة احتياطية قبل الدمج. لم تُكتب بيانات إلى Supabase ولم يُحذف أي سجل.';
    say(localSaved?summary:summary+' تنبيه: مساحة التخزين المحلية ممتلئة؛ القائمة معروضة الآن لكن لم تُحفظ محليًا على هذا الهاتف.',true);
   }catch(e){console.error('fha07 student download failed',e);say('لم يكتمل التحميل: '+(e?.message||String(e))+'؛ لم تُكتب أي بيانات إلى Supabase.',false)}
@@ -8159,7 +8181,7 @@ window.FHA02CloudStatus = {
  document.addEventListener('DOMContentLoaded',()=>{
    $('fha07DownloadStudents')?.addEventListener('click',download);
    document.addEventListener('click',e=>{if(e.target.closest('[data-nav="studentsMenuPage"],[data-nav="teacherStudentPreviewPage"],[data-nav="studentsPage"],[data-nav="studentListPage"],[data-nav="studentManagementPage"]')){setTimeout(syncWhenTeacherOpens,350);setTimeout(syncWhenTeacherOpens,1000);}});
-  document.addEventListener('tahadi:admin-authenticated',()=>{setTimeout(()=>{download().catch(err=>console.error('Haya 33 student refresh after admin login failed',err));},250);});
+  document.addEventListener('tahadi:admin-authenticated',()=>{setTimeout(()=>{download().catch(err=>console.error('Haya 34 student refresh after admin login failed',err));},250);});
    // عند فتح قائمة التلاميذ، ابدأ بالموجود محليًا ثم حدّث العرض بعد اكتمال قراءة Supabase.
    window.addEventListener('focus',()=>{if(document.getElementById('studentsPage')?.classList.contains('active'))setTimeout(syncWhenTeacherOpens,100);});
  });
@@ -8337,3 +8359,5 @@ window.FHA02CloudStatus = {
 
 </body>
 </html>
+
+<!-- Haya 34: repair cloud student loading/profile mapping and save new students through authenticated teacher-register-student Edge Function. Source preserved as index_before_Haya34_fix.html. -->
